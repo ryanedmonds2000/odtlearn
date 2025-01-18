@@ -16,6 +16,8 @@ from odtlearn.utils.validation import (
     check_y_hat,
 )
 
+import numpy as np
+import scipy.spatial.distance
 
 class FlowOPT_IPW_Unobserved(FlowOPTSingleSink):
     """
@@ -107,12 +109,18 @@ class FlowOPT_IPW_Unobserved(FlowOPTSingleSink):
             verbose,
         )
 
+    
+
+
+
     def fit(
         self,
         X: Union[ndarray, DataFrame],
         t: Union[Series, ndarray],
         y: Union[Series, ndarray],
         ipw: Union[Series, ndarray],
+        gamma: float,
+        epsilon: ndarray,
     ) -> "FlowOPT_IPW":
         """
         Fit the FlowOPT_IPW model to the given training data.
@@ -157,6 +165,10 @@ class FlowOPT_IPW_Unobserved(FlowOPTSingleSink):
         >>> opt = FlowOPT_IPW(depth=2, time_limit=60)
         >>> opt.fit(X, t, y, ipw)
         """
+
+
+
+        
         # store column information and dtypes if any
         self._extract_metadata(X, y, t)
 
@@ -173,12 +185,91 @@ class FlowOPT_IPW_Unobserved(FlowOPTSingleSink):
             min(t) == 0 and max(t) == len(set(t)) - 1
         ), "The set of treatments must be discrete starting from {0, 1, ...}"
 
+        assert (
+            min(epsilon) >= 0
+        )
         # we also need to check on y and ipw/y_hat depending on the method chosen
         y = check_y(X, y)
         self._ipw = check_ipw(X, ipw)
 
+        # TODO: check consistent length of epsilon with # treatments
+
         # Raises ValueError if there is a column that has values other than 0 or 1
         check_binary(X)
+
+        numagents = np.size(self._datapoints)
+        distances = scipy.spatial.distance.squareform(scipy.spatial.distance.pdist(X))
+
+        def _dualized_variables(self) -> None:
+            self._aupper = self._solver.add_vars(
+                self._datapoints, 
+                vtype = ODTL.CONTINUOUS,
+                lb = 0,
+                name="a_upper"
+            )
+            self._alower = self._solver.add_vars(
+                self._datapoints, 
+                vtype = ODTL.CONTINUOUS,
+                ub = 0,
+                name="a_lower"
+            )
+            self._beta = self._solver.add_vars(
+                self._treatments,
+                vtype = ODTL.CONTINUOUS,
+                name="beta"
+            )
+            self._sigma = self._solver.add_vars(
+                self._datapoints, 
+                vtype = ODTL.CONTINUOUS,
+                lb = 0,
+                name="sigma"
+            )
+            self._theta = self._solver.add_vars(
+                self._treatments,
+                self._datapoints,
+                vtype=ODTL.CONTINUOUS,
+                lb=0,
+                name="theta"
+            )
+
+        def _define_variables(self) -> None:
+            super()._define_variables()
+            self._dualized_variables()
+
+        def _dualized_constraints(self) -> None:
+            self._solver.add_constrs(
+                (
+                    gamma**(-1) * self._aupper[i] + gamma * self._alower[i] - (self._sigma[i] / numagents)
+                    <= self._solver.quicksum(
+                        self._z[i, 1] * (self._y[i]) / self._ipw[i]
+                        for i in self._datapoints
+                    )
+                )
+                for i in self._datapoints
+            )
+
+            for j in self._datapoints:
+                for t in self._treatments:
+                    for i in self._datapoints:
+                        if self._t.at[i] == t:
+                            self._solver.add_constrs(
+                                distances[i, j] * self._beta[t] + self._theta[t, j] + self._sigma[i] <= 0
+                            )
+        def _define_constraints(self) -> None:
+            super()._define_constraints()
+            self._dualized_constraints()
+
+        def _define_objectve(self) -> None:
+            obj = self._solver.lin_expr(0)  
+            for i in self._datapoints:
+                obj += (
+                    self._aupper[i] * (gamma + ((1 - self._ipw[i]) / self.ipw[i])) 
+                    + self._alower[i] * (gamma**(-1) + ((1 - self._ipw[i]) / self.ipw[i])) 
+                )      
+            for t in self._treatments:
+                obj += epsilon[t] * self._beta[t]
+                for i in self._datapoints:
+                    obj += self._theta[t, i] / numagents
 
         self._create_main_problem()
         self._solver.optimize(self._X, self, self._solver)
